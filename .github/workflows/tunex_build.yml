@@ -1,0 +1,149 @@
+name: TuneX Custom OSD Firmware Builder
+run-name: TuneX-Build-${{ inputs.build_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_id:
+        description: "Unique TuneX Build ID"
+        required: true
+        type: string
+      target_board:
+        description: "Betaflight Target Board"
+        required: true
+        type: string
+      warn_low_bat:
+        description: "11-byte Low Battery Warning"
+        required: true
+        type: string
+      warn_land_now:
+        description: "9-byte Land Now Warning"
+        required: true
+        type: string
+      warn_crash_flip:
+        description: "12-byte Crash Flip Warning"
+        required: true
+        type: string
+      warn_core_prefix:
+        description: "4-byte Core Temp Prefix"
+        required: true
+        type: string
+      armed_normal_text:
+        description: "Normal Armed Text"
+        required: true
+        type: string
+      throttle_99_text:
+        description: "4-byte 99%+ Throttle Text"
+        required: true
+        type: string
+
+jobs:
+  compile-custom-hex:
+    runs-on: ubuntu-latest
+    container:
+      image: betaflight/build:latest
+    steps:
+      - name: Checkout Clean Source
+        uses: actions/checkout@v4
+
+      - name: Apply 6-Point OSD C Patches
+        env:
+          IN_LOW_BAT: ${{ inputs.warn_low_bat }}
+          IN_LAND_NOW: ${{ inputs.warn_land_now }}
+          IN_CRASH_FLIP: ${{ inputs.warn_crash_flip }}
+          IN_CORE: ${{ inputs.warn_core_prefix }}
+          IN_ARMED: ${{ inputs.armed_normal_text }}
+          IN_THR99: ${{ inputs.throttle_99_text }}
+        run: |
+          python3 - << 'EOF'
+          import os
+          import re
+          import sys
+
+          low_bat = os.environ["IN_LOW_BAT"]
+          land_now = os.environ["IN_LAND_NOW"]
+          crash_flip = os.environ["IN_CRASH_FLIP"]
+          core_pfx = os.environ["IN_CORE"]
+          armed_txt = os.environ["IN_ARMED"]
+          thr99_txt = os.environ["IN_THR99"]
+
+          # 1~4. src/main/osd/osd_warnings.c 패치
+          warn_path = "src/main/osd/osd_warnings.c"
+          with open(warn_path, "r", encoding="utf-8") as f:
+              w_code = f.read()
+
+          for old_s, new_s in [
+              ('"LOW BATTERY"', f'"{low_bat}"'),
+              ('" LAND NOW"', f'"{land_now}"'),
+              ('">CRASH FLIP<"', f'"{crash_flip}"'),
+              ('"CORE %c: %3d%c"', f'"{core_pfx} %c: %3d%c"'),
+          ]:
+              if old_s not in w_code:
+                  sys.exit(f"[ERROR] Pattern {old_s} not found in {warn_path}")
+              w_code = w_code.replace(old_s, new_s, 1)
+
+          with open(warn_path, "w", encoding="utf-8") as f:
+              f.write(w_code)
+
+          # 5. src/main/osd/osd.c (osdShowArmed 일반/터틀 단독 중앙 출력 분기)
+          osd_path = "src/main/osd/osd.c"
+          with open(osd_path, "r", encoding="utf-8") as f:
+              o_code = f.read()
+
+          armed_replacement = (
+              f'if (isFlipOverAfterCrashActive()) {{\n'
+              f'        displayWrite(osdDisplayPort, (osdDisplayPort->cols - {len(crash_flip)}) / 2, 7, DISPLAYPORT_ATTR_NONE, "{crash_flip}");\n'
+              f'    }} else {{\n'
+              f'        displayWrite(osdDisplayPort, (osdDisplayPort->cols - {len(armed_txt)}) / 2, 7, DISPLAYPORT_ATTR_NONE, "{armed_txt}");\n'
+              f'    }}'
+          )
+          o_code_new, cnt_o = re.subn(
+              r'displayWrite\s*\(\s*osdDisplayPort\s*,[^;]+,\s*"ARMED"\s*\)\s*;',
+              armed_replacement,
+              o_code,
+              count=1,
+          )
+          if cnt_o == 0:
+              sys.exit("[ERROR] osdShowArmed 'ARMED' pattern not found in src/main/osd/osd.c")
+
+          with open(osd_path, "w", encoding="utf-8") as f:
+              f.write(o_code_new)
+
+          # 6. src/main/osd/osd_elements.c (OSD_THROTTLE_POS 99% 이상 아이콘 제거 및 4바이트 출력)
+          elem_path = "src/main/osd/osd_elements.c"
+          with open(elem_path, "r", encoding="utf-8") as f:
+              e_code = f.read()
+
+          thr_func_pattern = re.compile(
+              r'(static\s+void\s+osdElementThrottlePosition\s*\(\s*osdElementParms_t\s*\*\s*element\s*\)\s*\{)([\s\S]*?)(\n\})'
+          )
+          new_thr_body = f"""
+              const int thrPos = (constrain(rcData[THROTTLE], PWM_RANGE_MIN, PWM_RANGE_MAX) - PWM_RANGE_MIN) * 100 / (PWM_RANGE_MAX - PWM_RANGE_MIN);
+              if (thrPos >= 99) {{
+                  tfp_sprintf(element->buff, "{thr99_txt}");
+              }} else {{
+                  element->buff[0] = SYM_THR;
+                  tfp_sprintf(element->buff + 1, "%3d", thrPos);
+              }}"""
+
+          e_code_new, cnt_e = thr_func_pattern.subn(r'\1' + new_thr_body + r'\3', e_code, count=1)
+          if cnt_e == 0:
+              sys.exit("[ERROR] osdElementThrottlePosition not found in src/main/osd/osd_elements.c")
+
+          with open(elem_path, "w", encoding="utf-8") as f:
+              f.write(e_code_new)
+
+          print("✔ All 6 OSD C patches applied cleanly.")
+          EOF
+
+      - name: Build Target HEX
+        run: |
+          make ${{ inputs.target_board }} -j$(nproc)
+
+      - name: Upload Compiled HEX
+        uses: actions/upload-artifact@v4
+        with:
+          name: tunex-hex-${{ inputs.build_id }}
+          path: obj/betaflight_*_${{ inputs.target_board }}.hex
+          if-no-files-found: error
+          retention-days: 1

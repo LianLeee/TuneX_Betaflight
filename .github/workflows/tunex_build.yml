@@ -143,6 +143,7 @@ jobs:
 
       - name: Build Target HEX
         run: |
+          make configs
           make ${{ inputs.target_board }} -j$(nproc)
 
       - name: Upload Compiled HEX

@@ -90,17 +90,21 @@ jobs:
               f.write(w_code)
           print("✔ [1-4] osd_warnings.c patched")
 
-          # 5. src/main/osd/osd.c (fc/core.h 헤더 주입 + 원본 속성 상수 그대로 유지)
+          # 5. src/main/osd/osd.c (브랜치별 Crash Flip 함수명 자동 감지 후 주입)
+          with open("src/main/fc/core.h", "r", encoding="utf-8") as f:
+              core_h = f.read()
+          crash_fn = (
+              "isCrashFlipModeActive"
+              if "isCrashFlipModeActive" in core_h
+              else "isFlipOverAfterCrashActive"
+          )
+
           osd_path = "src/main/osd/osd.c"
           with open(osd_path, "r", encoding="utf-8") as f:
               o_code = f.read()
 
           if '#include "fc/core.h"' not in o_code:
-              o_code = o_code.replace(
-                  '#include "osd/osd.h"',
-                  '#include "osd/osd.h"\n#include "fc/core.h"',
-                  1,
-              )
+              o_code = '#include "fc/core.h"\n' + o_code
 
           armed_match = re.search(
               r'displayWrite\s*\(\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^,]+)\s*,\s*"ARMED"\s*\)\s*;',
@@ -114,7 +118,7 @@ jobs:
           attr_const = armed_match.group(4).strip()
 
           armed_replacement = (
-              f'if (isFlipOverAfterCrashActive()) {{\n'
+              f'if ({crash_fn}()) {{\n'
               f'        displayWrite({disp_ptr}, ({disp_ptr}->cols - {len(crash_flip)}) / 2, {y_coord}, {attr_const}, "{crash_flip}");\n'
               f'    }} else {{\n'
               f'        displayWrite({disp_ptr}, ({disp_ptr}->cols - {len(armed_txt)}) / 2, {y_coord}, {attr_const}, "{armed_txt}");\n'
@@ -123,7 +127,7 @@ jobs:
           o_code = o_code[:armed_match.start()] + armed_replacement + o_code[armed_match.end():]
           with open(osd_path, "w", encoding="utf-8") as f:
               f.write(o_code)
-          print("✔ [5] osd.c patched")
+          print(f"✔ [5] osd.c patched using {crash_fn}()")
 
           # 6. src/main/osd/osd_elements.c (OSD_THROTTLE_POS 99% 이상 4바이트 텍스트 치환)
           elem_path = "src/main/osd/osd_elements.c"

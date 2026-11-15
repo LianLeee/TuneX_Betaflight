@@ -90,24 +90,34 @@ jobs:
               f.write(w_code)
           print("✔ [1-4] osd_warnings.c patched")
 
-          # 5. src/main/osd/osd.c (osdShowArmed 일반/터틀 단독 중앙 출력 분기)
+          # 5. src/main/osd/osd.c (fc/core.h 헤더 주입 + 원본 속성 상수 그대로 유지)
           osd_path = "src/main/osd/osd.c"
           with open(osd_path, "r", encoding="utf-8") as f:
               o_code = f.read()
 
+          if '#include "fc/core.h"' not in o_code:
+              o_code = o_code.replace(
+                  '#include "osd/osd.h"',
+                  '#include "osd/osd.h"\n#include "fc/core.h"',
+                  1,
+              )
+
           armed_match = re.search(
-              r'displayWrite\s*\(\s*([^,]+)\s*,[^;]+,\s*"ARMED"\s*\)\s*;',
+              r'displayWrite\s*\(\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^,]+)\s*,\s*"ARMED"\s*\)\s*;',
               o_code,
           )
           if not armed_match:
               sys.exit("[ERROR] 'ARMED' displayWrite not found in src/main/osd/osd.c")
 
           disp_ptr = armed_match.group(1).strip()
+          y_coord = armed_match.group(3).strip()
+          attr_const = armed_match.group(4).strip()
+
           armed_replacement = (
               f'if (isFlipOverAfterCrashActive()) {{\n'
-              f'        displayWrite({disp_ptr}, ({disp_ptr}->cols - {len(crash_flip)}) / 2, 7, DISPLAYPORT_ATTR_NONE, "{crash_flip}");\n'
+              f'        displayWrite({disp_ptr}, ({disp_ptr}->cols - {len(crash_flip)}) / 2, {y_coord}, {attr_const}, "{crash_flip}");\n'
               f'    }} else {{\n'
-              f'        displayWrite({disp_ptr}, ({disp_ptr}->cols - {len(armed_txt)}) / 2, 7, DISPLAYPORT_ATTR_NONE, "{armed_txt}");\n'
+              f'        displayWrite({disp_ptr}, ({disp_ptr}->cols - {len(armed_txt)}) / 2, {y_coord}, {attr_const}, "{armed_txt}");\n'
               f'    }}'
           )
           o_code = o_code[:armed_match.start()] + armed_replacement + o_code[armed_match.end():]

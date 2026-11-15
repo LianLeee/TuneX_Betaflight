@@ -40,11 +40,15 @@ on:
 jobs:
   compile-custom-hex:
     runs-on: ubuntu-latest
-    container:
-      image: betaflight/build:latest
     steps:
       - name: Checkout Clean Source
         uses: actions/checkout@v4
+
+      - name: Install Build Dependencies & ARM SDK
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential libc6-dev-i386 curl unzip
+          make arm_sdk_install
 
       - name: Apply 6-Point OSD C Patches
         env:
@@ -84,38 +88,40 @@ jobs:
 
           with open(warn_path, "w", encoding="utf-8") as f:
               f.write(w_code)
+          print("✔ [1-4] osd_warnings.c patched")
 
           # 5. src/main/osd/osd.c (osdShowArmed 일반/터틀 단독 중앙 출력 분기)
           osd_path = "src/main/osd/osd.c"
           with open(osd_path, "r", encoding="utf-8") as f:
               o_code = f.read()
 
+          armed_match = re.search(
+              r'displayWrite\s*\(\s*([^,]+)\s*,[^;]+,\s*"ARMED"\s*\)\s*;',
+              o_code,
+          )
+          if not armed_match:
+              sys.exit("[ERROR] 'ARMED' displayWrite not found in src/main/osd/osd.c")
+
+          disp_ptr = armed_match.group(1).strip()
           armed_replacement = (
               f'if (isFlipOverAfterCrashActive()) {{\n'
-              f'        displayWrite(osdDisplayPort, (osdDisplayPort->cols - {len(crash_flip)}) / 2, 7, DISPLAYPORT_ATTR_NONE, "{crash_flip}");\n'
+              f'        displayWrite({disp_ptr}, ({disp_ptr}->cols - {len(crash_flip)}) / 2, 7, DISPLAYPORT_ATTR_NONE, "{crash_flip}");\n'
               f'    }} else {{\n'
-              f'        displayWrite(osdDisplayPort, (osdDisplayPort->cols - {len(armed_txt)}) / 2, 7, DISPLAYPORT_ATTR_NONE, "{armed_txt}");\n'
+              f'        displayWrite({disp_ptr}, ({disp_ptr}->cols - {len(armed_txt)}) / 2, 7, DISPLAYPORT_ATTR_NONE, "{armed_txt}");\n'
               f'    }}'
           )
-          o_code_new, cnt_o = re.subn(
-              r'displayWrite\s*\(\s*osdDisplayPort\s*,[^;]+,\s*"ARMED"\s*\)\s*;',
-              armed_replacement,
-              o_code,
-              count=1,
-          )
-          if cnt_o == 0:
-              sys.exit("[ERROR] osdShowArmed 'ARMED' pattern not found in src/main/osd/osd.c")
-
+          o_code = o_code[:armed_match.start()] + armed_replacement + o_code[armed_match.end():]
           with open(osd_path, "w", encoding="utf-8") as f:
-              f.write(o_code_new)
+              f.write(o_code)
+          print("✔ [5] osd.c patched")
 
-          # 6. src/main/osd/osd_elements.c (OSD_THROTTLE_POS 99% 이상 아이콘 제거 및 4바이트 출력)
+          # 6. src/main/osd/osd_elements.c (OSD_THROTTLE_POS 99% 이상 4바이트 텍스트 치환)
           elem_path = "src/main/osd/osd_elements.c"
           with open(elem_path, "r", encoding="utf-8") as f:
               e_code = f.read()
 
           thr_func_pattern = re.compile(
-              r'(static\s+void\s+osdElementThrottlePosition\s*\(\s*osdElementParms_t\s*\*\s*element\s*\)\s*\{)([\s\S]*?)(\n\})'
+              r'(static\s+void\s+osdElementThrottlePosition\s*\([^)]+\)\s*\{)([\s\S]*?)(\n\})'
           )
           new_thr_body = f"""
               const int thrPos = (constrain(rcData[THROTTLE], PWM_RANGE_MIN, PWM_RANGE_MAX) - PWM_RANGE_MIN) * 100 / (PWM_RANGE_MAX - PWM_RANGE_MIN);
@@ -132,8 +138,7 @@ jobs:
 
           with open(elem_path, "w", encoding="utf-8") as f:
               f.write(e_code_new)
-
-          print("✔ All 6 OSD C patches applied cleanly.")
+          print("✔ [6] osd_elements.c patched")
           EOF
 
       - name: Build Target HEX
